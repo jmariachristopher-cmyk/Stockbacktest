@@ -59,13 +59,13 @@ def download_history(token, instrument_key, start, end, progress=None, status=No
 
         message = f"Downloading {current} → {chunk_end}"
 
-        if progress:
+        if progress is not None:
             progress.progress(
                 min(completed_days / total_days, 0.99),
                 text=message
             )
 
-        if status:
+        if status is not None:
             status.info(message)
 
         chunk = get_candles(
@@ -75,7 +75,7 @@ def download_history(token, instrument_key, start, end, progress=None, status=No
             chunk_end.isoformat()
         )
 
-        if not chunk.empty:
+        if len(chunk) > 0:
             parts.append(chunk)
 
         completed_days += (chunk_end - current).days + 1
@@ -100,7 +100,7 @@ def download_history(token, instrument_key, start, end, progress=None, status=No
 
     data = data.sort_values("timestamp").reset_index(drop=True)
 
-    if progress:
+    if progress is not None:
         progress.progress(1.0, text="Download complete")
 
     return data
@@ -131,7 +131,7 @@ def build_daily_reference_table(data, reference_start, reference_end):
     for trading_date, day in x.groupby("Date", sort=True):
         ref = day[day["Time"] == reference_start]
 
-        if ref.empty:
+        if len(ref) == 0:
             continue
 
         candle = ref.iloc[0]
@@ -153,7 +153,7 @@ def build_daily_reference_table(data, reference_start, reference_end):
 # BACKTEST
 # ------------------------------------------------------------
 def run_backtest(data, reference_start, reference_end, quantity):
-    if data.empty:
+    if len(data) == 0:
         return pd.DataFrame(), pd.DataFrame()
 
     x = data.copy()
@@ -243,10 +243,10 @@ def run_backtest(data, reference_start, reference_end, quantity):
             # The 15:10 candle is the 5-minute candle ending at 15:15.
             eod = day[day["Time"] == "15:10"]
 
-            if eod.empty:
+            if len(eod) == 0:
                 eod = day[day["Time"] <= "15:15"]
 
-            if not eod.empty:
+            if len(eod) > 0:
                 exit_candle = eod.iloc[-1]
                 exit_reason = "3:15 PM EXIT"
 
@@ -310,7 +310,7 @@ def run_backtest(data, reference_start, reference_end, quantity):
 # ------------------------------------------------------------
 def make_summary(trades, start, end, stock, reference_candle, quantity):
 
-    if trades.empty:
+    if len(trades) == 0:
         return pd.DataFrame(columns=["Metric", "Value"])
 
     wins = int((trades["P&L Points"] > 0).sum())
@@ -333,7 +333,7 @@ def make_summary(trades, start, end, stock, reference_candle, quantity):
 
     profit_factor = (
         gross_profit / abs(gross_loss)
-        if gross_loss != 0
+        if float(gross_loss) != 0.0
         else float("inf")
     )
 
@@ -627,7 +627,7 @@ if run_backtest:
             quantity
         )
 
-        if references.empty:
+        if len(references) == 0:
             st.warning(
                 "No reference candles were found."
             )
@@ -638,6 +638,12 @@ if run_backtest:
         # ----------------------------------------------------
         st.subheader(
             "🔴 Daily Reference Levels"
+        )
+
+        st.caption(
+            "CHECK THIS TABLE against TradingView. "
+            "Reference High/Low are the actual High/Low of the selected "
+            "5-minute candle for each individual trading day."
         )
 
         st.info(
@@ -661,7 +667,7 @@ if run_backtest:
             hide_index=True
         )
 
-        if trades.empty:
+        if len(trades) == 0:
             st.warning(
                 "Reference candles were found, but no breakout "
                 "trades were generated."
@@ -708,7 +714,7 @@ if run_backtest:
             "Profit Factor",
             (
                 f"{gross_profit / abs(gross_loss):.2f}"
-                if gross_loss
+                if float(gross_loss) != 0.0
                 else "INF"
             )
         )
