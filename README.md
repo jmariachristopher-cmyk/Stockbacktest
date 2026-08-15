@@ -1,22 +1,17 @@
 # Upstox 5-Minute Breakout Backtester
 
-Streamlit app for a close-based 5-minute reference candle breakout strategy using Upstox Historical Candle V3 API.
+Fixed version of the Streamlit 5-minute breakout backtester.
 
-## Rules
-- Select a reference 5-minute candle.
-- Long when a later 5-minute candle closes above reference high.
-- Long SL is reference low, triggered only by 5-minute close.
-- Short when a later 5-minute candle closes below reference low.
-- Short SL is reference high, triggered only by 5-minute close.
+## Strategy
+- Select a 5-minute reference candle.
+- Long when a later 5-minute candle CLOSES above the reference high.
+- Long SL = reference low; SL only on 5-minute CLOSE.
+- Short when a later 5-minute candle CLOSES below the reference low.
+- Short SL = reference high; SL only on 5-minute CLOSE.
 - One trade per day; no re-entry.
-- Open position exits at 3:15 PM using the 15:10 candle close.
-- Download full Excel report.
+- Open trade exits at 3:15 PM using the 15:10 candle close.
+- Full Excel export.
 
-## Run locally
-```bash
+## Run
 pip install -r requirements.txt
 streamlit run app.py
-```
-
-## Streamlit Cloud
-Deploy the GitHub repository and enter the Upstox access token in the app. Prefer Streamlit secrets for production.
