@@ -1,47 +1,50 @@
-# Upstox 5-Minute Reference Candle Backtester V6
+# Upstox 5-Minute Reference Candle Backtester V7
 
-## Important
+## Daily reference price — the key rule
 
-The previous versions were hiding the exact Python line that produced the
-`'bool' object is not callable` error.
+For EVERY trading day, the app finds the exact selected 5-minute candle.
 
-V6 separates the process into:
-1. Download
-2. Daily reference-level calculation
-3. Trade calculation
-4. Excel creation
+Example: selecting 09:35 means the 09:35–09:40 candle.
 
-If any step fails, V6 displays the full Python traceback in Streamlit.
+For each date:
+- Reference High = HIGH of that date's 09:35–09:40 candle
+- Reference Low = LOW of that date's 09:35–09:40 candle
 
-## Reference price
+The prices are recalculated independently every day.
 
-For every trading day, the selected exact 5-minute candle is used:
+A price such as 2006.40 / 2001.70 from a TradingView example is NEVER
+hard-coded and is NEVER reused for another date.
 
-Reference High = that candle's High
-Reference Low = that candle's Low
+## Trading rules
 
-The levels are recalculated independently every day.
+After the reference candle:
 
-## Trade rules
+LONG:
+- a later 5-minute candle CLOSES above that day's Reference High
+- entry at that closing price
+- stop loss is that day's Reference Low
+- stop triggers only when a later 5-minute candle CLOSES at/below the
+  Reference Low
 
-Long:
-- later 5-minute CLOSE > reference High
-- stop when later 5-minute CLOSE <= reference Low
+SHORT:
+- a later 5-minute candle CLOSES below that day's Reference Low
+- entry at that closing price
+- stop loss is that day's Reference High
+- stop triggers only when a later 5-minute candle CLOSES at/above the
+  Reference High
 
-Short:
-- later 5-minute CLOSE < reference Low
-- stop when later 5-minute CLOSE >= reference High
+Only the first trade of the day is taken. No re-entry.
 
-Open trade:
-- exits at 3:15 PM using the 15:10 candle close
+If still open, exit at the 15:10 candle close, which represents the
+3:10–3:15 candle and therefore the 3:15 PM close.
 
-One trade maximum per day.
+## Excel workbook
 
-## Excel
-
-One workbook:
+One workbook contains:
 - Summary
 - Reference Levels
 - All Trades
-- one YYYY-MM tab per month
+- YYYY-MM monthly tabs
 - Rules
+
+The Reference Levels tab is the audit trail for the daily High/Low values.

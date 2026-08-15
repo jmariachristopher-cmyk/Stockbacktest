@@ -246,13 +246,28 @@ def create_reference_levels(
         }
     )
 
+    # These are the REAL prices from each day's selected candle.
+    # No hard-coded reference price is used anywhere.
+    for col in [
+        "Reference Open",
+        "Reference High",
+        "Reference Low",
+        "Reference Close",
+    ]:
+        refs[col] = pd.to_numeric(
+            refs[col],
+            errors="coerce"
+        )
+
     refs.insert(
         1,
         "Reference Candle",
         f"{reference_start}-{reference_end}"
     )
 
-    return refs.reset_index(drop=True)
+    return refs.sort_values(
+        "Date"
+    ).reset_index(drop=True)
 
 
 # ============================================================
@@ -294,23 +309,30 @@ def backtest(
 
     # --------------------------------------------------------
     # Each reference row belongs to ONE day.
+    #
+    # IMPORTANT:
+    # We deliberately use row["..."] instead of itertuples().
+    # This prevents pandas from changing column names such as
+    # "Reference Timestamp" into a namedtuple field.
+    #
+    # Most importantly, Reference High and Reference Low are
+    # read from THAT DAY'S selected candle. They are never fixed
+    # prices and are never carried forward to another day.
     # --------------------------------------------------------
-    for reference_row in references.itertuples(
-        index=False
-    ):
+    for _, reference_row in references.iterrows():
 
-        trading_date = reference_row.Date
+        trading_date = reference_row["Date"]
 
-        reference_timestamp = (
-            reference_row.Reference_Timestamp
+        reference_timestamp = pd.Timestamp(
+            reference_row["Reference Timestamp"]
         )
 
         reference_high = float(
-            reference_row.Reference_High
+            reference_row["Reference High"]
         )
 
         reference_low = float(
-            reference_row.Reference_Low
+            reference_row["Reference Low"]
         )
 
         day = x.loc[
@@ -873,8 +895,9 @@ if run:
 
         st.info(
             "These are the ACTUAL High and Low of the "
-            "selected 5-minute candle for each day. "
-            "The levels change every day."
+            "selected 5-minute candle for EACH individual day. "
+            "The levels change every day. No example/fixed price "
+            "is used for the backtest."
         )
 
         st.dataframe(
@@ -1038,8 +1061,8 @@ if run:
             ],
             "Definition": [
                 f"{reference_start}-{reference_end}",
-                "That day's selected candle HIGH",
-                "That day's selected candle LOW",
+                "Actual HIGH of that day's selected 5-minute candle; recalculated every trading day",
+                "Actual LOW of that day's selected 5-minute candle; recalculated every trading day",
                 "Later 5-minute candle CLOSE > that day's Reference High",
                 "Later 5-minute candle CLOSE <= that day's Reference Low",
                 "Later 5-minute candle CLOSE < that day's Reference Low",
