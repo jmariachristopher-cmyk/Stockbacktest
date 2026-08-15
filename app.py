@@ -10,7 +10,7 @@ import streamlit as st
 
 
 st.set_page_config(
-    page_title="Upstox 5-Minute Reference Candle Backtester",
+    page_title="Upstox 5-Minute Reference Candle Backtester — V8",
     layout="wide"
 )
 
@@ -360,17 +360,11 @@ def backtest(
         # ----------------------------------------------------
         # Look for first breakout.
         # ----------------------------------------------------
-        for candle in after_reference.itertuples(
-            index=False
-        ):
+        for _, candle in after_reference.iterrows():
 
-            candle_time = candle.timestamp.strftime(
-                "%H:%M"
-            )
+            candle_time = pd.Timestamp(candle["timestamp"]).strftime("%H:%M")
 
-            close_price = float(
-                candle.close
-            )
+            close_price = float(candle["close"])
 
             if direction is None:
 
@@ -380,7 +374,7 @@ def backtest(
                     and close_price > reference_high
                 ):
                     direction = "LONG"
-                    entry_time = candle.timestamp
+                    entry_time = candle["timestamp"]
                     entry_price = close_price
                     continue
 
@@ -390,7 +384,7 @@ def backtest(
                     and close_price < reference_low
                 ):
                     direction = "SHORT"
-                    entry_time = candle.timestamp
+                    entry_time = candle["timestamp"]
                     entry_price = close_price
                     continue
 
@@ -400,7 +394,7 @@ def backtest(
             if direction == "LONG":
 
                 if close_price <= reference_low:
-                    exit_time = candle.timestamp
+                    exit_time = candle["timestamp"]
                     exit_price = close_price
                     exit_reason = "STOP LOSS"
                     break
@@ -411,7 +405,7 @@ def backtest(
             if direction == "SHORT":
 
                 if close_price >= reference_high:
-                    exit_time = candle.timestamp
+                    exit_time = candle["timestamp"]
                     exit_price = close_price
                     exit_reason = "STOP LOSS"
                     break
@@ -464,12 +458,12 @@ def backtest(
                 f"{reference_start}-{reference_end}"
             ),
             "Reference Open": float(
-                reference_row.Reference_Open
+                reference_row["Reference Open"]
             ),
             "Reference High": reference_high,
             "Reference Low": reference_low,
             "Reference Close": float(
-                reference_row.Reference_Close
+                reference_row["Reference Close"]
             ),
             "Direction": direction,
             "Entry Time": entry_time,
@@ -717,7 +711,7 @@ def create_excel(
 # STREAMLIT UI
 # ============================================================
 st.title(
-    "📊 Upstox 5-Minute Reference Candle Backtester"
+    "📊 Upstox 5-Minute Reference Candle Backtester — V8"
 )
 
 st.caption(
@@ -919,6 +913,26 @@ if run:
         # STEP 3: BACKTEST
         # ====================================================
         try:
+
+            required_reference_cols = [
+                "Date", "Reference Timestamp", "Reference High",
+                "Reference Low", "Reference Open", "Reference Close"
+            ]
+            missing_reference_cols = [
+                c for c in required_reference_cols
+                if c not in references.columns
+            ]
+            if missing_reference_cols:
+                raise ValueError(
+                    "Reference table is missing: "
+                    + ", ".join(missing_reference_cols)
+                )
+
+            if references[["Reference High", "Reference Low"]].isna().any().any():
+                raise ValueError(
+                    "Missing daily Reference High/Low. "
+                    "No fixed/reference example price will be substituted."
+                )
 
             trades, references = backtest(
                 raw,
