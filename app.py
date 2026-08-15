@@ -28,24 +28,36 @@ def get_candles(token, instrument_key, from_date, to_date):
     )
 
 def download_history(token, instrument_key, start, end, progress_bar=None, status_box=None):
+    """
+    Upstox V3 allows a maximum of 1 month for 1-15 minute historical
+    intervals. To avoid UDAPI1148 at month boundaries, use conservative
+    28-day chunks. This is intentionally smaller than the documented
+    1-month limit.
+    """
     parts = []
     cur = start
     total_days = max((end - start).days + 1, 1)
     done = 0
 
     while cur <= end:
-        chunk_end = min(cur + timedelta(days=30), end)
+        chunk_end = min(cur + timedelta(days=27), end)
 
         fraction = min(done / total_days, 0.99)
         message = f"Downloading {cur} → {chunk_end}"
+
         if progress_bar is not None:
             progress_bar.progress(fraction, text=message)
+
         if status_box is not None:
             status_box.info(message)
 
         df = get_candles(
-            token, instrument_key, cur.isoformat(), chunk_end.isoformat()
+            token,
+            instrument_key,
+            cur.isoformat(),
+            chunk_end.isoformat()
         )
+
         if not df.empty:
             parts.append(df)
 
@@ -225,7 +237,7 @@ def make_excel(trades, summary, raw, rules):
 st.title("📊 Upstox 5-Minute Breakout Backtester")
 st.caption(
     "Historical 5-minute OHLC • reference-candle breakout • "
-    "close-based stop-loss • 3:15 PM exit"
+    "close-based stop-loss • 3:15 PM exit • 28-day API chunks"
 )
 
 with st.sidebar:
