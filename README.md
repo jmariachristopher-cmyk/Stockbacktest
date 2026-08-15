@@ -1,23 +1,47 @@
-# Upstox 5-Minute Reference Candle Backtester V5
+# Upstox 5-Minute Reference Candle Backtester V6
 
-V5 fixes the Streamlit runtime issue (`'bool' object is not callable`) by using
-explicit DataFrame length checks and explicit numeric checks.
+## Important
 
-Reference-price logic:
-- The selected 5-minute candle is found separately for every trading day.
-- Reference High = that day's selected candle High.
-- Reference Low = that day's selected candle Low.
-- Levels are not carried to another day.
-- Long entry = later 5-minute close above that day's Reference High.
-- Long SL = later 5-minute close at/below that day's Reference Low.
-- Short entry = later 5-minute close below that day's Reference Low.
-- Short SL = later 5-minute close at/above that day's Reference High.
-- Open position exits at 3:15 PM using the 15:10 candle close.
-- No re-entry after the first trade of a day.
+The previous versions were hiding the exact Python line that produced the
+`'bool' object is not callable` error.
 
-Excel:
+V6 separates the process into:
+1. Download
+2. Daily reference-level calculation
+3. Trade calculation
+4. Excel creation
+
+If any step fails, V6 displays the full Python traceback in Streamlit.
+
+## Reference price
+
+For every trading day, the selected exact 5-minute candle is used:
+
+Reference High = that candle's High
+Reference Low = that candle's Low
+
+The levels are recalculated independently every day.
+
+## Trade rules
+
+Long:
+- later 5-minute CLOSE > reference High
+- stop when later 5-minute CLOSE <= reference Low
+
+Short:
+- later 5-minute CLOSE < reference Low
+- stop when later 5-minute CLOSE >= reference High
+
+Open trade:
+- exits at 3:15 PM using the 15:10 candle close
+
+One trade maximum per day.
+
+## Excel
+
+One workbook:
 - Summary
 - Reference Levels
 - All Trades
-- one YYYY-MM tab for every month
+- one YYYY-MM tab per month
 - Rules

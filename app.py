@@ -1,72 +1,103 @@
 
 import os
 import io
+import traceback
 from datetime import date, timedelta
-import requests
+
 import pandas as pd
+import requests
 import streamlit as st
 
-st.set_page_config(page_title="Upstox 5-Min Reference Candle Backtester", layout="wide")
+
+st.set_page_config(
+    page_title="Upstox 5-Minute Reference Candle Backtester",
+    layout="wide"
+)
 
 API_BASE = "https://api.upstox.com/v3/historical-candle"
 
 
-# ------------------------------------------------------------
-# UPSTOX DATA
-# ------------------------------------------------------------
+# ============================================================
+# UPSTOX DOWNLOAD
+# ============================================================
 def get_candles(token, instrument_key, from_date, to_date):
     url = f"{API_BASE}/{instrument_key}/minutes/5/{to_date}/{from_date}"
+
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {token}",
     }
 
-    response = requests.get(url, headers=headers, timeout=45)
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=45
+    )
 
     if response.status_code != 200:
         raise RuntimeError(
-            f"Upstox API {response.status_code}: {response.text[:500]}"
+            f"Upstox API {response.status_code}: "
+            f"{response.text[:1000]}"
         )
 
-    candles = response.json().get("data", {}).get("candles", [])
+    payload = response.json()
+    candles = payload.get("data", {}).get("candles", [])
 
     rows = []
-    for candle in candles:
-        rows.append([
-            candle[0],
-            float(candle[1]),
-            float(candle[2]),
-            float(candle[3]),
-            float(candle[4]),
-            float(candle[5]) if len(candle) > 5 and candle[5] is not None else 0,
-        ])
 
-    return pd.DataFrame(
-        rows,
-        columns=["timestamp", "open", "high", "low", "close", "volume"]
+    for candle in candles:
+        if len(candle) < 5:
+            continue
+
+        rows.append({
+            "timestamp": candle[0],
+            "open": float(candle[1]),
+            "high": float(candle[2]),
+            "low": float(candle[3]),
+            "close": float(candle[4]),
+            "volume": (
+                float(candle[5])
+                if len(candle) > 5 and candle[5] is not None
+                else 0.0
+            ),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def download_history(
+    token,
+    instrument_key,
+    start,
+    end,
+    progress_bar,
+    status_box
+):
+    parts = []
+
+    current = start
+    total_days = max(
+        (end - start).days + 1,
+        1
     )
 
-
-def download_history(token, instrument_key, start, end, progress=None, status=None):
-    # Conservative 28-day chunks to stay below Upstox minute-data range limits.
-    parts = []
-    current = start
-    total_days = max((end - start).days + 1, 1)
-    completed_days = 0
+    processed_days = 0
 
     while current <= end:
-        chunk_end = min(current + timedelta(days=27), end)
 
-        message = f"Downloading {current} → {chunk_end}"
+        chunk_end = min(
+            current + timedelta(days=27),
+            end
+        )
 
-        if progress is not None:
-            progress.progress(
-                min(completed_days / total_days, 0.99),
-                text=message
-            )
+        status_box.info(
+            f"Downloading {current} → {chunk_end}"
+        )
 
-        if status is not None:
-            status.info(message)
+        progress_bar.progress(
+            min(processed_days / total_days, 0.99),
+            text=f"Downloading {current} → {chunk_end}"
+        )
 
         chunk = get_candles(
             token,
@@ -75,92 +106,185 @@ def download_history(token, instrument_key, start, end, progress=None, status=No
             chunk_end.isoformat()
         )
 
-        if len(chunk) > 0:
+        if len(chunk.index) > 0:
             parts.append(chunk)
 
-        completed_days += (chunk_end - current).days + 1
+        processed_days += (
+            chunk_end - current
+        ).days + 1
+
         current = chunk_end + timedelta(days=1)
 
-    if not parts:
+    if len(parts) == 0:
         return pd.DataFrame(
-            columns=["timestamp", "open", "high", "low", "close", "volume"]
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume"
+            ]
         )
 
-    data = pd.concat(parts, ignore_index=True)
-    data = data.drop_duplicates(subset=["timestamp"])
-    data["timestamp"] = pd.to_datetime(data["timestamp"])
+    data = pd.concat(
+        parts,
+        ignore_index=True
+    )
 
-    # Upstox timestamps are converted to IST.
-    if getattr(data["timestamp"].dt, "tz", None) is not None:
-        data["timestamp"] = (
-            data["timestamp"]
-            .dt.tz_convert("Asia/Kolkata")
-            .dt.tz_localize(None)
-        )
+    data = data.drop_duplicates(
+        subset=["timestamp"]
+    )
 
-    data = data.sort_values("timestamp").reset_index(drop=True)
+    # Explicit timestamp conversion.
+    data["timestamp"] = pd.to_datetime(
+        data["timestamp"],
+        errors="coerce"
+    )
 
-    if progress is not None:
-        progress.progress(1.0, text="Download complete")
+    data = data.dropna(
+        subset=["timestamp"]
+    )
+
+    # Convert to IST if timestamps are timezone-aware.
+    try:
+        if data["timestamp"].dt.tz is not None:
+            data["timestamp"] = (
+                data["timestamp"]
+                .dt.tz_convert("Asia/Kolkata")
+                .dt.tz_localize(None)
+            )
+    except Exception:
+        # If Upstox already returned naive timestamps,
+        # leave them unchanged.
+        pass
+
+    data = data.sort_values(
+        "timestamp"
+    ).reset_index(drop=True)
+
+    progress_bar.progress(
+        1.0,
+        text="Download complete"
+    )
 
     return data
 
 
-# ------------------------------------------------------------
-# REFERENCE CANDLE
-# ------------------------------------------------------------
-def build_daily_reference_table(data, reference_start, reference_end):
+# ============================================================
+# DAILY REFERENCE CANDLE
+# ============================================================
+def create_reference_levels(
+    data,
+    reference_start,
+    reference_end
+):
     """
-    IMPORTANT:
-    For EVERY trading day, the selected 5-minute candle is found independently.
+    THIS IS THE CORE REFERENCE-PRICE LOGIC.
 
-    Example:
-      09:40-09:45 candle
-      Reference High = THAT candle's High
-      Reference Low  = THAT candle's Low
+    For each trading day:
 
-    The next day gets a completely new High/Low.
+        Reference High = High of that day's selected candle
+        Reference Low  = Low of that day's selected candle
+
+    The levels are recalculated every day.
     """
 
     x = data.copy()
-    x["Date"] = x["timestamp"].dt.date
-    x["Time"] = x["timestamp"].dt.strftime("%H:%M")
 
-    rows = []
+    x["TradingDate"] = (
+        x["timestamp"]
+        .dt
+        .date
+    )
 
-    for trading_date, day in x.groupby("Date", sort=True):
-        ref = day[day["Time"] == reference_start]
+    x["Clock"] = (
+        x["timestamp"]
+        .dt
+        .strftime("%H:%M")
+    )
 
-        if len(ref) == 0:
-            continue
+    # Select ONLY the exact requested 5-minute candle.
+    refs = x.loc[
+        x["Clock"] == reference_start,
+        [
+            "TradingDate",
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close"
+        ]
+    ].copy()
 
-        candle = ref.iloc[0]
+    if len(refs.index) == 0:
+        return pd.DataFrame(
+            columns=[
+                "Date",
+                "Reference Candle",
+                "Reference Open",
+                "Reference High",
+                "Reference Low",
+                "Reference Close",
+                "Reference Timestamp"
+            ]
+        )
 
-        rows.append({
-            "Date": trading_date,
-            "Reference Candle": f"{reference_start}-{reference_end}",
-            "Reference Open": float(candle["open"]),
-            "Reference High": float(candle["high"]),
-            "Reference Low": float(candle["low"]),
-            "Reference Close": float(candle["close"]),
-            "Reference Timestamp": candle["timestamp"],
-        })
+    refs = refs.drop_duplicates(
+        subset=["TradingDate"],
+        keep="first"
+    )
 
-    return pd.DataFrame(rows)
+    refs = refs.rename(
+        columns={
+            "TradingDate": "Date",
+            "open": "Reference Open",
+            "high": "Reference High",
+            "low": "Reference Low",
+            "close": "Reference Close",
+            "timestamp": "Reference Timestamp",
+        }
+    )
+
+    refs.insert(
+        1,
+        "Reference Candle",
+        f"{reference_start}-{reference_end}"
+    )
+
+    return refs.reset_index(drop=True)
 
 
-# ------------------------------------------------------------
+# ============================================================
 # BACKTEST
-# ------------------------------------------------------------
-def run_backtest(data, reference_start, reference_end, quantity):
-    if len(data) == 0:
-        return pd.DataFrame(), pd.DataFrame()
+# ============================================================
+def backtest(
+    data,
+    reference_start,
+    reference_end,
+    quantity
+):
+    if len(data.index) == 0:
+        return (
+            pd.DataFrame(),
+            pd.DataFrame()
+        )
 
     x = data.copy()
-    x["Date"] = x["timestamp"].dt.date
-    x["Time"] = x["timestamp"].dt.strftime("%H:%M")
 
-    reference_table = build_daily_reference_table(
+    x["TradingDate"] = (
+        x["timestamp"]
+        .dt
+        .date
+    )
+
+    x["Clock"] = (
+        x["timestamp"]
+        .dt
+        .strftime("%H:%M")
+    )
+
+    references = create_reference_levels(
         x,
         reference_start,
         reference_end
@@ -168,174 +292,255 @@ def run_backtest(data, reference_start, reference_end, quantity):
 
     trades = []
 
-    for _, reference in reference_table.iterrows():
+    # --------------------------------------------------------
+    # Each reference row belongs to ONE day.
+    # --------------------------------------------------------
+    for reference_row in references.itertuples(
+        index=False
+    ):
 
-        trading_date = reference["Date"]
+        trading_date = reference_row.Date
 
-        day = x[x["Date"] == trading_date].copy()
+        reference_timestamp = (
+            reference_row.Reference_Timestamp
+        )
 
-        # Normal NSE session.
-        day = day[
-            (day["Time"] >= "09:15") &
-            (day["Time"] <= "15:15")
-        ].sort_values("timestamp")
+        reference_high = float(
+            reference_row.Reference_High
+        )
 
-        reference_timestamp = reference["Reference Timestamp"]
+        reference_low = float(
+            reference_row.Reference_Low
+        )
 
-        # CRITICAL:
-        # Only candles AFTER the reference candle can trigger an entry.
-        after_reference = day[
+        day = x.loc[
+            (x["TradingDate"] == trading_date)
+            &
+            (x["Clock"] >= "09:15")
+            &
+            (x["Clock"] <= "15:15")
+        ].sort_values(
+            "timestamp"
+        )
+
+        # Never use the reference candle itself for entry.
+        after_reference = day.loc[
             day["timestamp"] > reference_timestamp
         ]
 
-        reference_high = float(reference["Reference High"])
-        reference_low = float(reference["Reference Low"])
-
-        position = None
-        entry = None
-        exit_candle = None
+        direction = None
+        entry_time = None
+        entry_price = None
+        exit_time = None
+        exit_price = None
         exit_reason = None
 
-        for _, candle in after_reference.iterrows():
+        # ----------------------------------------------------
+        # Look for first breakout.
+        # ----------------------------------------------------
+        for candle in after_reference.itertuples(
+            index=False
+        ):
 
-            candle_time = candle["timestamp"].strftime("%H:%M")
-            close = float(candle["close"])
+            candle_time = candle.timestamp.strftime(
+                "%H:%M"
+            )
 
-            # ------------------------------------------------
-            # ENTRY
-            # ------------------------------------------------
-            # Entry is based ONLY on a 5-minute candle CLOSE.
-            if position is None and candle_time <= "15:10":
+            close_price = float(
+                candle.close
+            )
 
-                # BUY breakout
-                if close > reference_high:
-                    position = "LONG"
-                    entry = candle
+            if direction is None:
+
+                # Long breakout.
+                if (
+                    candle_time <= "15:10"
+                    and close_price > reference_high
+                ):
+                    direction = "LONG"
+                    entry_time = candle.timestamp
+                    entry_price = close_price
                     continue
 
-                # SELL breakdown
-                if close < reference_low:
-                    position = "SHORT"
-                    entry = candle
+                # Short breakdown.
+                if (
+                    candle_time <= "15:10"
+                    and close_price < reference_low
+                ):
+                    direction = "SHORT"
+                    entry_time = candle.timestamp
+                    entry_price = close_price
                     continue
 
             # ------------------------------------------------
-            # STOP LOSS
+            # Long stop loss.
             # ------------------------------------------------
-            # SL is also evaluated ONLY on 5-minute candle CLOSE.
-            if position == "LONG":
-                if close <= reference_low:
-                    exit_candle = candle
+            if direction == "LONG":
+
+                if close_price <= reference_low:
+                    exit_time = candle.timestamp
+                    exit_price = close_price
                     exit_reason = "STOP LOSS"
                     break
 
-            if position == "SHORT":
-                if close >= reference_high:
-                    exit_candle = candle
+            # ------------------------------------------------
+            # Short stop loss.
+            # ------------------------------------------------
+            if direction == "SHORT":
+
+                if close_price >= reference_high:
+                    exit_time = candle.timestamp
+                    exit_price = close_price
                     exit_reason = "STOP LOSS"
                     break
 
         # ----------------------------------------------------
-        # 3:15 PM EXIT
+        # 3:15 PM exit.
+        #
+        # NSE 5-minute candle 15:10 represents the candle
+        # ending at 15:15.
         # ----------------------------------------------------
-        if position is not None and exit_candle is None:
+        if (
+            direction is not None
+            and exit_time is None
+        ):
 
-            # The 15:10 candle is the 5-minute candle ending at 15:15.
-            eod = day[day["Time"] == "15:10"]
+            eod = day.loc[
+                day["Clock"] == "15:10"
+            ]
 
-            if len(eod) == 0:
-                eod = day[day["Time"] <= "15:15"]
+            if len(eod.index) > 0:
 
-            if len(eod) > 0:
-                exit_candle = eod.iloc[-1]
+                last = eod.iloc[-1]
+
+                exit_time = last["timestamp"]
+                exit_price = float(
+                    last["close"]
+                )
                 exit_reason = "3:15 PM EXIT"
 
-        if position is None or exit_candle is None:
+        if (
+            direction is None
+            or exit_time is None
+        ):
             continue
 
-        entry_price = float(entry["close"])
-        exit_price = float(exit_candle["close"])
-
-        if position == "LONG":
-            pnl_points = exit_price - entry_price
+        if direction == "LONG":
+            pnl_points = (
+                exit_price - entry_price
+            )
+            stop_price = reference_low
         else:
-            pnl_points = entry_price - exit_price
+            pnl_points = (
+                entry_price - exit_price
+            )
+            stop_price = reference_high
 
         trades.append({
             "Date": trading_date,
-
-            # DAILY REFERENCE CANDLE
-            "Reference Candle": reference["Reference Candle"],
-            "Reference Open": reference["Reference Open"],
+            "Reference Candle": (
+                f"{reference_start}-{reference_end}"
+            ),
+            "Reference Open": float(
+                reference_row.Reference_Open
+            ),
             "Reference High": reference_high,
             "Reference Low": reference_low,
-            "Reference Close": reference["Reference Close"],
-
-            # TRADE
-            "Direction": position,
-            "Entry Time": entry["timestamp"],
-            "Entry Price": entry_price,
-
-            # DAILY REFERENCE LEVEL USED AS SL
-            "Stop Loss Price": (
-                reference_low
-                if position == "LONG"
-                else reference_high
+            "Reference Close": float(
+                reference_row.Reference_Close
             ),
-
-            "Exit Time": exit_candle["timestamp"],
+            "Direction": direction,
+            "Entry Time": entry_time,
+            "Entry Price": entry_price,
+            "Stop Loss Price": stop_price,
+            "Exit Time": exit_time,
             "Exit Price": exit_price,
             "Exit Reason": exit_reason,
-
             "P&L Points": pnl_points,
-            "P&L ₹": pnl_points * quantity,
-
+            "P&L ₹": pnl_points * int(quantity),
             "Result": (
                 "PROFIT"
                 if pnl_points > 0
-                else ("LOSS" if pnl_points < 0 else "BREAKEVEN")
-            ),
+                else (
+                    "LOSS"
+                    if pnl_points < 0
+                    else "BREAKEVEN"
+                )
+            )
         })
 
     trades_df = pd.DataFrame(trades)
 
-    if not trades_df.empty:
-        trades_df["Cumulative P&L ₹"] = trades_df["P&L ₹"].cumsum()
+    if len(trades_df.index) > 0:
+        trades_df["Cumulative P&L ₹"] = (
+            trades_df["P&L ₹"].cumsum()
+        )
 
-    return trades_df, reference_table
+    return trades_df, references
 
 
-# ------------------------------------------------------------
+# ============================================================
 # SUMMARY
-# ------------------------------------------------------------
-def make_summary(trades, start, end, stock, reference_candle, quantity):
+# ============================================================
+def create_summary(
+    trades,
+    start,
+    end,
+    stock,
+    reference_candle,
+    quantity
+):
+    if len(trades.index) == 0:
+        return pd.DataFrame(
+            columns=["Metric", "Value"]
+        )
 
-    if len(trades) == 0:
-        return pd.DataFrame(columns=["Metric", "Value"])
-
-    wins = int((trades["P&L Points"] > 0).sum())
-    losses = int((trades["P&L Points"] < 0).sum())
-    breakeven = int((trades["P&L Points"] == 0).sum())
-
-    gross_profit = trades.loc[
-        trades["P&L Points"] > 0,
-        "P&L ₹"
-    ].sum()
-
-    gross_loss = trades.loc[
-        trades["P&L Points"] < 0,
-        "P&L ₹"
-    ].sum()
-
-    net_pnl = trades["P&L ₹"].sum()
-
-    win_rate = wins / len(trades) * 100
-
-    profit_factor = (
-        gross_profit / abs(gross_loss)
-        if float(gross_loss) != 0.0
-        else float("inf")
+    wins = int(
+        (
+            trades["P&L Points"] > 0
+        ).sum()
     )
+
+    losses = int(
+        (
+            trades["P&L Points"] < 0
+        ).sum()
+    )
+
+    breakeven = int(
+        (
+            trades["P&L Points"] == 0
+        ).sum()
+    )
+
+    gross_profit = float(
+        trades.loc[
+            trades["P&L Points"] > 0,
+            "P&L ₹"
+        ].sum()
+    )
+
+    gross_loss = float(
+        trades.loc[
+            trades["P&L Points"] < 0,
+            "P&L ₹"
+        ].sum()
+    )
+
+    net_pnl = float(
+        trades["P&L ₹"].sum()
+    )
+
+    win_rate = (
+        wins / len(trades.index) * 100
+    )
+
+    if gross_loss != 0:
+        profit_factor = (
+            gross_profit / abs(gross_loss)
+        )
+    else:
+        profit_factor = float("inf")
 
     return pd.DataFrame({
         "Metric": [
@@ -351,13 +556,13 @@ def make_summary(trades, start, end, stock, reference_candle, quantity):
             "Gross Loss ₹",
             "Net P&L ₹",
             "Profit Factor",
-            "Quantity",
+            "Quantity"
         ],
         "Value": [
             stock,
             f"{start} to {end}",
             reference_candle,
-            len(trades),
+            len(trades.index),
             wins,
             losses,
             breakeven,
@@ -365,35 +570,32 @@ def make_summary(trades, start, end, stock, reference_candle, quantity):
             round(gross_profit, 2),
             round(gross_loss, 2),
             round(net_pnl, 2),
-            round(profit_factor, 3)
-            if profit_factor != float("inf")
-            else "INF",
-            quantity,
+            (
+                "INF"
+                if profit_factor == float("inf")
+                else round(profit_factor, 3)
+            ),
+            quantity
         ]
     })
 
 
-# ------------------------------------------------------------
+# ============================================================
 # EXCEL
-# ------------------------------------------------------------
-def make_excel(trades, references, summary, raw, rules):
-
-    """
-    ONE Excel workbook.
-
-    Tabs:
-      Summary
-      Reference Levels
-      All Trades
-      2022-08
-      2022-09
-      ...
-      Rules
-    """
-
+# ============================================================
+def create_excel(
+    trades,
+    references,
+    summary,
+    raw,
+    rules
+):
     output = io.BytesIO()
 
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl"
+    ) as writer:
 
         summary.to_excel(
             writer,
@@ -401,7 +603,6 @@ def make_excel(trades, references, summary, raw, rules):
             sheet_name="Summary"
         )
 
-        # This is important for verifying the daily High/Low.
         references.to_excel(
             writer,
             index=False,
@@ -414,28 +615,32 @@ def make_excel(trades, references, summary, raw, rules):
             sheet_name="All Trades"
         )
 
-        monthly = trades.copy()
+        if len(trades.index) > 0:
 
-        monthly["_month"] = (
-            pd.to_datetime(monthly["Date"])
-            .dt.strftime("%Y-%m")
-        )
+            temp = trades.copy()
 
-        # Every month gets its OWN TAB in the SAME Excel file.
-        for month, month_data in monthly.groupby(
-            "_month",
-            sort=True
-        ):
-
-            month_data = month_data.drop(
-                columns=["_month"]
+            temp["_Month"] = (
+                pd.to_datetime(
+                    temp["Date"]
+                )
+                .dt
+                .strftime("%Y-%m")
             )
 
-            month_data.to_excel(
-                writer,
-                index=False,
-                sheet_name=month
-            )
+            for month, monthly in temp.groupby(
+                "_Month",
+                sort=True
+            ):
+
+                monthly = monthly.drop(
+                    columns=["_Month"]
+                )
+
+                monthly.to_excel(
+                    writer,
+                    index=False,
+                    sheet_name=month
+                )
 
         rules.to_excel(
             writer,
@@ -448,17 +653,21 @@ def make_excel(trades, references, summary, raw, rules):
         for worksheet in workbook.worksheets:
 
             worksheet.freeze_panes = "A2"
-            worksheet.auto_filter.ref = worksheet.dimensions
 
-            for column_cells in worksheet.columns:
-
-                column_letter = (
-                    column_cells[0].column_letter
+            if worksheet.max_row > 1:
+                worksheet.auto_filter.ref = (
+                    worksheet.dimensions
                 )
 
-                maximum = 0
+            for column in worksheet.columns:
 
-                for cell in column_cells[:1000]:
+                letter = (
+                    column[0].column_letter
+                )
+
+                longest = 0
+
+                for cell in column[:1000]:
 
                     value = (
                         ""
@@ -466,32 +675,33 @@ def make_excel(trades, references, summary, raw, rules):
                         else str(cell.value)
                     )
 
-                    maximum = max(
-                        maximum,
+                    longest = max(
+                        longest,
                         len(value)
                     )
 
                 worksheet.column_dimensions[
-                    column_letter
+                    letter
                 ].width = min(
-                    max(maximum + 2, 10),
+                    max(longest + 2, 10),
                     30
                 )
 
     output.seek(0)
-
     return output.getvalue()
 
 
-# ------------------------------------------------------------
-# UI
-# ------------------------------------------------------------
-st.title("📊 Upstox 5-Minute Reference Candle Backtester")
+# ============================================================
+# STREAMLIT UI
+# ============================================================
+st.title(
+    "📊 Upstox 5-Minute Reference Candle Backtester"
+)
 
 st.caption(
-    "Daily reference High/Low • exact selected 5-minute candle • "
-    "close-based breakout & stop-loss • 3:15 PM exit • "
-    "one Excel workbook with monthly tabs"
+    "Exact daily reference candle High/Low • "
+    "5-minute close breakout • close-based stop loss • "
+    "3:15 PM exit • one Excel workbook with monthly tabs"
 )
 
 with st.sidebar:
@@ -527,7 +737,7 @@ with st.sidebar:
         value=date(2026, 8, 14)
     )
 
-    available_times = [
+    reference_times = [
         f"{hour:02d}:{minute:02d}"
         for hour in range(9, 16)
         for minute in (
@@ -535,15 +745,16 @@ with st.sidebar:
             30, 35, 40, 45, 50, 55
         )
         if not (
-            hour == 15 and minute > 10
+            hour == 15
+            and minute > 10
         )
     ]
 
     reference_start = st.selectbox(
         "Reference Candle Start",
-        available_times,
-        index=available_times.index(
-            "09:40"
+        reference_times,
+        index=reference_times.index(
+            "09:35"
         )
     )
 
@@ -564,16 +775,16 @@ with st.sidebar:
         step=1
     )
 
-    run_backtest = st.button(
+    run = st.button(
         "🚀 Run 4-Year Backtest",
         type="primary",
         use_container_width=True
     )
 
 
-if run_backtest:
+if run:
 
-    if not token:
+    if token.strip() == "":
         st.error(
             "Enter your Upstox Access Token."
         )
@@ -591,65 +802,79 @@ if run_backtest:
         )
         st.stop()
 
-    progress = st.progress(
+    progress_bar = st.progress(
         0,
         text="Starting..."
     )
 
-    status = st.empty()
+    status_box = st.empty()
 
     try:
 
+        # ====================================================
+        # STEP 1: DOWNLOAD
+        # ====================================================
         raw = download_history(
             token,
             instrument,
             start,
             end,
-            progress,
-            status
+            progress_bar,
+            status_box
         )
 
-        if raw.empty:
+        if len(raw.index) == 0:
             st.error(
-                "No data returned by Upstox. "
-                "Check the instrument key, token and dates."
+                "Upstox returned no candles."
             )
             st.stop()
 
-        status.success(
-            f"Downloaded {len(raw):,} 5-minute candles."
+        status_box.success(
+            f"Downloaded {len(raw.index):,} "
+            "5-minute candles."
         )
 
-        trades, references = run_backtest(
-            raw,
-            reference_start,
-            reference_end,
-            quantity
-        )
+        # ====================================================
+        # STEP 2: REFERENCE LEVELS
+        # ====================================================
+        try:
 
-        if len(references) == 0:
+            references = create_reference_levels(
+                raw,
+                reference_start,
+                reference_end
+            )
+
+        except Exception as error:
+
+            st.error(
+                "Reference candle calculation failed."
+            )
+
+            st.code(
+                traceback.format_exc(),
+                language="text"
+            )
+
+            st.stop()
+
+        if len(references.index) == 0:
+
             st.warning(
-                "No reference candles were found."
+                f"No {reference_start} candles were found "
+                "in the downloaded data."
             )
+
             st.stop()
 
-        # ----------------------------------------------------
-        # SHOW DAILY REFERENCE LEVELS
-        # ----------------------------------------------------
         st.subheader(
             "🔴 Daily Reference Levels"
         )
 
-        st.caption(
-            "CHECK THIS TABLE against TradingView. "
-            "Reference High/Low are the actual High/Low of the selected "
-            "5-minute candle for each individual trading day."
-        )
-
         st.info(
-            "Reference High and Reference Low are recalculated "
-            "from the selected candle independently for EVERY "
-            "trading day."
+            "These are the ACTUAL High and Low of the "
+            "selected 5-minute candle for each day. "
+            "The levels change every day."
         )
 
         st.dataframe(
@@ -660,21 +885,53 @@ if run_backtest:
                     "Reference Open",
                     "Reference High",
                     "Reference Low",
-                    "Reference Close",
+                    "Reference Close"
                 ]
             ],
             use_container_width=True,
             hide_index=True
         )
 
-        if len(trades) == 0:
-            st.warning(
-                "Reference candles were found, but no breakout "
-                "trades were generated."
+        # ====================================================
+        # STEP 3: BACKTEST
+        # ====================================================
+        try:
+
+            trades, references = backtest(
+                raw,
+                reference_start,
+                reference_end,
+                quantity
             )
+
+        except Exception:
+
+            st.error(
+                "Trade calculation failed. "
+                "The exact Python traceback is shown below "
+                "so we can identify the remaining issue."
+            )
+
+            st.code(
+                traceback.format_exc(),
+                language="text"
+            )
+
             st.stop()
 
-        summary = make_summary(
+        if len(trades.index) == 0:
+
+            st.warning(
+                "Reference levels were found, "
+                "but no breakout trade occurred."
+            )
+
+            st.stop()
+
+        # ====================================================
+        # SUMMARY
+        # ====================================================
+        summary = create_summary(
             trades,
             start,
             end,
@@ -683,58 +940,68 @@ if run_backtest:
             quantity
         )
 
-        columns = st.columns(6)
+        wins = int(
+            (
+                trades["P&L Points"] > 0
+            ).sum()
+        )
 
-        columns[0].metric(
+        losses = int(
+            (
+                trades["P&L Points"] < 0
+            ).sum()
+        )
+
+        total = len(trades.index)
+
+        gross_profit = float(
+            trades.loc[
+                trades["P&L Points"] > 0,
+                "P&L ₹"
+            ].sum()
+        )
+
+        gross_loss = float(
+            trades.loc[
+                trades["P&L Points"] < 0,
+                "P&L ₹"
+            ].sum()
+        )
+
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+        c1.metric(
             "Trades",
-            len(trades)
+            total
         )
 
-        columns[1].metric(
+        c2.metric(
             "Win Rate",
-            f"{(trades['P&L Points'] > 0).mean() * 100:.2f}%"
+            f"{wins / total * 100:.2f}%"
         )
 
-        columns[2].metric(
+        c3.metric(
             "Net P&L",
-            f"₹{trades['P&L ₹'].sum():,.2f}"
+            f"₹{float(trades['P&L ₹'].sum()):,.2f}"
         )
 
-        gross_profit = trades.loc[
-            trades["P&L Points"] > 0,
-            "P&L ₹"
-        ].sum()
-
-        gross_loss = trades.loc[
-            trades["P&L Points"] < 0,
-            "P&L ₹"
-        ].sum()
-
-        columns[3].metric(
+        c4.metric(
             "Profit Factor",
             (
                 f"{gross_profit / abs(gross_loss):.2f}"
-                if float(gross_loss) != 0.0
+                if gross_loss != 0
                 else "INF"
             )
         )
 
-        columns[4].metric(
+        c5.metric(
             "Wins",
-            int(
-                (
-                    trades["P&L Points"] > 0
-                ).sum()
-            )
+            wins
         )
 
-        columns[5].metric(
+        c6.metric(
             "Losses",
-            int(
-                (
-                    trades["P&L Points"] < 0
-                ).sum()
-            )
+            losses
         )
 
         st.subheader(
@@ -747,43 +1014,8 @@ if run_backtest:
             )["Cumulative P&L ₹"]
         )
 
-        left, right = st.columns(2)
-
-        with left:
-
-            st.subheader(
-                "Monthly P&L"
-            )
-
-            monthly_chart = trades.copy()
-
-            monthly_chart["Month"] = (
-                pd.to_datetime(
-                    monthly_chart["Date"]
-                )
-                .dt.to_period("M")
-                .astype(str)
-            )
-
-            st.bar_chart(
-                monthly_chart
-                .groupby("Month")["P&L ₹"]
-                .sum()
-            )
-
-        with right:
-
-            st.subheader(
-                "Trade Results"
-            )
-
-            st.bar_chart(
-                trades["Result"]
-                .value_counts()
-            )
-
         st.subheader(
-            "Trade-by-Trade Results"
+            "Trade Results"
         )
 
         st.dataframe(
@@ -801,23 +1033,26 @@ if run_backtest:
                 "Long Stop Loss",
                 "Short Entry",
                 "Short Stop Loss",
-                "Exit",
-                "Re-entry",
+                "3:15 PM Exit",
+                "Re-entry"
             ],
             "Definition": [
                 f"{reference_start}-{reference_end}",
-                "High of THAT day's selected 5-minute reference candle",
-                "Low of THAT day's selected 5-minute reference candle",
-                "Later 5-minute candle CLOSES above that day's Reference High",
-                "Later 5-minute candle CLOSES at/below that day's Reference Low",
-                "Later 5-minute candle CLOSES below that day's Reference Low",
-                "Later 5-minute candle CLOSES at/above that day's Reference High",
-                "Open trade closes at 3:15 PM using the 15:10 candle close",
-                "No re-entry after the first trade of the day",
+                "That day's selected candle HIGH",
+                "That day's selected candle LOW",
+                "Later 5-minute candle CLOSE > that day's Reference High",
+                "Later 5-minute candle CLOSE <= that day's Reference Low",
+                "Later 5-minute candle CLOSE < that day's Reference Low",
+                "Later 5-minute candle CLOSE >= that day's Reference High",
+                "Open trade exits using the 15:10 candle CLOSE",
+                "No re-entry after the first trade of the day"
             ]
         })
 
-        excel_file = make_excel(
+        # ====================================================
+        # EXCEL
+        # ====================================================
+        excel = create_excel(
             trades,
             references,
             summary,
@@ -829,7 +1064,8 @@ if run_backtest:
             pd.to_datetime(
                 trades["Date"]
             )
-            .dt.strftime("%Y-%m")
+            .dt
+            .strftime("%Y-%m")
             .nunique()
         )
 
@@ -840,10 +1076,10 @@ if run_backtest:
 
         st.download_button(
             "⬇️ Download ONE Excel — Monthly Tabs",
-            data=excel_file,
+            data=excel,
             file_name=(
                 f"{stock}_"
-                f"{reference_start.replace(':','')}_"
+                f"{reference_start.replace(':', '')}_"
                 f"4year_backtest.xlsx"
             ),
             mime=(
@@ -853,14 +1089,16 @@ if run_backtest:
             use_container_width=True
         )
 
-    except requests.RequestException as error:
+    except Exception:
+
         st.error(
-            f"Network/API error: {error}"
+            "Backtest error. "
+            "The exact traceback is shown below."
         )
 
-    except Exception as error:
-        st.error(
-            f"Backtest error: {error}"
+        st.code(
+            traceback.format_exc(),
+            language="text"
         )
 
 
