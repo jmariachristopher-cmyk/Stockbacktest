@@ -1,13 +1,36 @@
-# Upstox 5-Minute Reference Candle Backtester V8
+# V9 — Upstox / TradingView Reference Candle Alignment
 
-Genuine V8 code change.
+The user's TradingView screenshot established the required mapping.
 
-For EVERY trading date, the selected 5-minute candle supplies that day's own Reference High and Reference Low. No hard-coded example price is ever used for another day.
+When the UI says **09:35-09:40**, the reference candle is the candle
+displayed by TradingView at **09:40**.
 
-LONG: later 5-minute close > that day's Reference High. Stop: later 5-minute close <= that day's Reference Low.
+For Upstox historical 5-minute data, the corresponding row is selected
+using the **reference end time (09:40)**.
 
-SHORT: later 5-minute close < that day's Reference Low. Stop: later 5-minute close >= that day's Reference High.
+Verified user example for 2026-08-14:
+TradingView reference candle:
+Open 2002.7
+High 2006.4
+Low 2001.7
+Close 2001.7
 
-If still open, exit at the 15:10 candle close (3:15 PM). First trade only; no re-entry.
+The prior version incorrectly used the 09:35 row:
+Open 1999.1
+High 2005.0
+Low 1998.0
+Close 2002.7
 
-V8 also removes pandas namedtuple attribute access from the trade loop and uses explicit Series indexing.
+V9 uses 09:40 for the selected 09:35-09:40 reference.
+
+Daily:
+- Reference High = that day's selected candle High
+- Reference Low = that day's selected candle Low
+- LONG = subsequent 5-minute CLOSE > that day's High
+- LONG SL = subsequent 5-minute CLOSE <= that day's Low
+- SHORT = subsequent 5-minute CLOSE < that day's Low
+- SHORT SL = subsequent 5-minute CLOSE >= that day's High
+- First trade only; no re-entry
+- Open trade exits on 15:10 candle close (3:15 PM)
+
+Excel includes monthly tabs and an audit column for the Upstox candle timestamp.

@@ -204,9 +204,23 @@ def create_reference_levels(
         .strftime("%H:%M")
     )
 
-    # Select ONLY the exact requested 5-minute candle.
+    # IMPORTANT TIME ALIGNMENT:
+    # Upstox's 5-minute historical candle timestamp is the START of the
+    # candle, while TradingView displays the candle by its END/label time
+    # in the user's chart. Therefore, when the user selects 09:35-09:40,
+    # the candle that TradingView shows at 09:40 must be used.
+    #
+    # Example verified by the user's screenshot (2026-08-14):
+    # TradingView reference candle = O 2002.7 / H 2006.4 /
+    # L 2001.7 / C 2001.7.
+    #
+    # The previous version selected the Upstox 09:35 row, which had
+    # O 1999.1 / H 2005 / L 1998 / C 2002.7.
+    # We therefore select the Upstox row at reference_end (09:40).
+    reference_api_time = reference_end
+
     refs = x.loc[
-        x["Clock"] == reference_start,
+        x["Clock"] == reference_api_time,
         [
             "TradingDate",
             "timestamp",
@@ -222,6 +236,7 @@ def create_reference_levels(
             columns=[
                 "Date",
                 "Reference Candle",
+                "Upstox Candle Timestamp",
                 "Reference Open",
                 "Reference High",
                 "Reference Low",
@@ -263,6 +278,12 @@ def create_reference_levels(
         1,
         "Reference Candle",
         f"{reference_start}-{reference_end}"
+    )
+
+    refs.insert(
+        2,
+        "Upstox Candle Timestamp",
+        reference_api_time
     )
 
     return refs.sort_values(
