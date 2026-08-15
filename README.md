@@ -1,18 +1,22 @@
-# Upstox 5-Minute Breakout Backtester V3
+# Upstox 5-Minute Reference Candle Backtester V4
 
-The app creates ONE Excel workbook. Every month is a separate tab inside that same workbook.
+This version fixes the reference-price definition.
 
-Example tabs:
+For EVERY trading day:
+1. Find the exact selected 5-minute candle.
+2. Reference High = that candle's actual High.
+3. Reference Low = that candle's actual Low.
+4. Those two levels are used only for that trading day.
+5. The next trading day gets a completely new pair of levels.
+
+The app displays a `Reference Levels` table before/alongside the trade results so
+the values can be checked against TradingView.
+
+Excel output is ONE workbook containing:
 - Summary
+- Reference Levels
 - All Trades
-- 2022-08
-- 2022-09
-- 2022-10
-- ...
-- 2026-08
+- One tab per month (YYYY-MM)
 - Rules
 
-Every daily reference candle is recalculated independently. The selected candle's
-Open, High, Low and Close are included in the monthly tabs.
-
-The previous Upstox date-range issue is avoided with conservative 28-day API chunks.
+The historical downloader uses conservative 28-day chunks for Upstox minute data.
